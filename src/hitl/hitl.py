@@ -65,32 +65,41 @@ class ConfidenceRouter:
         Returns:
             RoutingDecision with routing action and metadata
         """
-        # TODO 12: Implement routing logic
-        #
-        # 1. Check if action_type is in HIGH_RISK_ACTIONS
-        #    -> If yes: always escalate (action="escalate", priority="high",
-        #       requires_human=True, reason="High-risk action: {action_type}")
-        #
-        # 2. Check confidence thresholds:
-        #    - confidence >= 0.9:
-        #      action="auto_send", priority="low",
-        #      requires_human=False, reason="High confidence"
-        #
-        #    - 0.7 <= confidence < 0.9:
-        #      action="queue_review", priority="normal",
-        #      requires_human=True, reason="Medium confidence — needs review"
-        #
-        #    - confidence < 0.7:
-        #      action="escalate", priority="high",
-        #      requires_human=True, reason="Low confidence — escalating"
+        # 1) High-risk actions ALWAYS escalate — a confident agent on
+        # a money-transfer is still a money transfer that needs a human.
+        if action_type in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason=f"High-risk action: {action_type} — human approval required",
+                priority="high",
+                requires_human=True,
+            )
 
+        # 2) Confidence-based routing for everything else.
+        if confidence >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=confidence,
+                reason="High confidence — auto-sending to user",
+                priority="low",
+                requires_human=False,
+            )
+        if confidence >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=confidence,
+                reason="Medium confidence — needs human review",
+                priority="normal",
+                requires_human=True,
+            )
         return RoutingDecision(
-            action="auto_send",
+            action="escalate",
             confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+            reason="Low confidence — escalating to human immediately",
+            priority="high",
+            requires_human=True,
+        )
 
 
 # ============================================================
@@ -109,27 +118,60 @@ class ConfidenceRouter:
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "High-value money transfer approval",
+        "trigger": "User initiates a transfer >= 50,000,000 VND OR a transfer to a new beneficiary",
+        "hitl_model": "human-in-the-loop",  # agent must wait for approval before executing
+        "context_needed": [
+            "User identity (verified via OTP/biometric)",
+            "Beneficiary details (account number, name, bank)",
+            "Amount and currency",
+            "Transfer history with this beneficiary (new? recurring?)",
+            "Risk score from the fraud-detection model",
+        ],
+        "example": (
+            "Customer 'Lan' tries to send 100,000,000 VND to a new beneficiary "
+            "'Tran B' that she's never sent money to. The system pauses, shows a "
+            "human banker the transaction details + a 'first-time beneficiary' risk "
+            "flag, and only proceeds after the banker clicks 'Approve'."
+        ),
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Low-confidence / ambiguous query escalation",
+        "trigger": "ConfidenceRouter returns 'queue_review' OR 'escalate' (i.e. confidence < 0.9 OR a blocked/ambiguous intent)",
+        "hitl_model": "human-on-the-loop",  # agent drafts, human reviews before send
+        "context_needed": [
+            "Original user question (verbatim)",
+            "Agent's drafted response",
+            "Confidence score + reason for the low score",
+            "Recent conversation history (last 3 turns)",
+        ],
+        "example": (
+            "User asks 'My card was charged twice at a coffee shop in Tokyo but I "
+            "didn't travel — what do I do?'. The LLM's confidence is 0.62 because "
+            "this is a fraud-dispute case. The drafted response is queued for a "
+            "support agent who specializes in disputes, with a 15-minute SLA."
+        ),
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
+        "name": "Guardrail conflict / judge disagreement tiebreaker",
+        "trigger": "When input/output guardrails and the LLM-as-Judge give conflicting signals (e.g., input passes but judge flags as UNSAFE)",
+        "hitl_model": "human-as-tiebreaker",  # human makes the final call when 2 systems disagree
+        "context_needed": [
+            "Original input (verbatim)",
+            "Input guardrail verdict + which pattern matched (if any)",
+            "Output guardrail redacted version + list of detected PII/secrets",
+            "LLM-as-Judge verdict + reason",
+            "Suggested action (block / redact / send-as-is)",
+        ],
+        "example": (
+            "User says 'My phone number is 0901234567 and my email is "
+            "a@gmail.com — please confirm you have it on file.' Input layer "
+            "says 'safe, on-topic', but the LLM-as-Judge flags the response "
+            "as 'UNSAFE — echoed back PII'. A security analyst reviews and "
+            "chooses to redact the PII from the response before delivery."
+        ),
     },
 ]
 

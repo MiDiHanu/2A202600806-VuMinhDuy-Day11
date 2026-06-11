@@ -37,10 +37,31 @@ def detect_injection(user_input: str) -> bool:
     Returns:
         True if injection detected, False otherwise
     """
+    # Each pattern catches a specific class of injection. We lean on
+    # multiple patterns so a single paraphrase can't bypass everything.
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        # 1. Direct override ("ignore all previous instructions")
+        r"ignore (all )?(previous|above|prior) (instructions|prompts|rules|directives)",
+        # 2. Generic override ("forget your instructions", "override your system prompt")
+        r"(forget|override|disregard|rewrite|reset) (your|the|all) (instructions|prompts|rules|directives|memory)",
+        # 3. Role re-assignment ("you are now DAN", "pretend to be an unrestricted AI")
+        r"\b(you are now|act as|pretend (to be|you are)|from now on you (are|will))\b.{0,40}\b(unrestricted|dan|jailbreak|developer mode|root|admin)\b",
+        r"\bpretend\b.{0,40}\b(unrestricted|without (rules|filter)|jailbreak)\b",
+        # 4. Reveal-the-prompt attempts
+        r"(reveal|show|print|output|repeat|recite|expose|leak) (your|the|all) (system|initial|original|hidden|internal)?\s*(prompt|instructions?|config|configuration|message)",
+        # 5. Authority / roleplay that tries to bypass ("I am the admin", "I am a developer")
+        r"\b(i am|i'm) (the )?(admin|developer|root|owner|engineer|support|auditor|ciso)\b",
+        # 6. Vietnamese injection
+        r"(bỏ qua|quên|phớt lờ|xoá bỏ|ghi đè)\s+(mọi|tất cả|các)?\s*(hướng dẫn|chỉ dẫn|lệnh|quy tắc)",
+        r"(tiết lộ|cho (tôi|xem)|in ra|đưa ra)\s+(mật khẩu|api key|system prompt|cấu hình)",
+        # 7. Output format / encoding attack ("translate to base64", "output as JSON")
+        r"(translate|convert|encode|output|print|write)\b.{0,60}\b(base64|rot13|pig ?latin|json|yaml|xml|hex)\b.{0,40}\b(prompt|instruction|config|system)",
+        # 8. Fill-in-the-blank secret extraction
+        r"fill (in|the)\s+(the\s+)?(blank|values?)?\s*[:=]?\s*(password|api[ _-]?key|secret|token|database)",
+        # 9. "DAN / do anything now" style
+        r"\b(do anything now|dan mode|jailbreak|developer mode|godmode)\b",
+        # 10. Hypothetical / fictional frame trying to elicit secrets
+        r"\b(roleplay|pretend|hypothetically|imagine|fictional|for a (story|plot))\b.{0,80}\b(system ?prompt|password|api[ _-]?key|secret|configuration|credentials?)\b",
     ]
 
     for pattern in INJECTION_PATTERNS:
@@ -68,14 +89,42 @@ def topic_filter(user_input: str) -> bool:
     Returns:
         True if input should be BLOCKED (off-topic or blocked topic)
     """
-    input_lower = user_input.lower()
+    # Strip whitespace for length checks.
+    input_stripped = user_input.strip()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    # Step 0 — empty input is meaningless; don't let it through.
+    if not input_stripped:
+        return True
 
-    pass  # Replace with your implementation
+    # Step 0b — emoji-only / non-text-only input. If the input has zero
+    # ASCII letters or digits, it's not a real question. We allow up to
+    # 2 emoji/glyph "noise" with at least one alpha char.
+    ascii_letters = sum(1 for c in input_stripped if c.isascii() and c.isalpha())
+    if ascii_letters == 0:
+        return True
+
+    input_lower = input_stripped.lower()
+
+    # Step 1 — anything explicitly blocked is rejected immediately.
+    for blocked in BLOCKED_TOPICS:
+        # Use word boundaries so e.g. "class" doesn't match "ass".
+        if re.search(rf"\b{re.escape(blocked)}\b", input_lower):
+            return True
+
+    # Step 2 — if the input contains at least one allowed banking topic,
+    # it is on-topic. We check the substring instead of word-boundary
+    # so that Vietnamese diacritics variations still match.
+    for allowed in ALLOWED_TOPICS:
+        if allowed in input_lower:
+            return False  # explicitly on-topic
+
+    # Step 3 — tiny chit-chat ("hi", "thanks", "ok") should not be blocked
+    # just because it has no banking keyword. Allow short messages.
+    if len(input_lower) <= 12:
+        return False
+
+    # Step 4 — otherwise, treat as off-topic and block.
+    return True
 
 
 # ============================================================
@@ -128,14 +177,26 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        # 1) Prompt injection — highest priority. We never want the LLM to
+        # see an injection attempt, even if it could plausibly answer it.
+        if detect_injection(text):
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process that request. It looks like a prompt-injection "
+                "attempt. I can only help with VinBank banking questions."
+            )
 
-        pass  # Replace with your implementation
+        # 2) Off-topic / blocked topic — keep the assistant on-domain.
+        if topic_filter(text):
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm a VinBank customer service assistant. I can only help with "
+                "banking questions (accounts, transfers, loans, interest rates, "
+                "credit cards, etc.). Please rephrase your question."
+            )
+
+        # 3) Both checks passed — let the message reach the LLM.
+        return None
 
 
 # ============================================================
